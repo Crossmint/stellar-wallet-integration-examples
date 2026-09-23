@@ -4,3 +4,4 @@ __pycache__/
 *.py[cod]
 target/
 test_snapshots/
+.venv/

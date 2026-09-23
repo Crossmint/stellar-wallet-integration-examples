@@ -1,68 +1,117 @@
 # Stellar wallet integration examples
 
-Reusable examples for Crossmint Stellar smart wallets: recovery methods, operational signer permissions, WhatsApp OTP and atomic payouts. Servers generate transactions through REST; the selected signer approves them through the application's signing flow. The examples do not depend on a particular customer, app framework or server layout.
+Generate atomic token payouts from a Crossmint Stellar smart wallet using a server-side REST request. The included Soroban contract transfers one token from one source wallet to multiple recipients in one invocation. If a transfer fails, the group reverts.
 
-**AI-generated proof of concept.** Review the code carefully and validate it on staging/testnet before using real funds. The payout contract passed local execution and authorization tests, but has not been independently audited or tested end to end through Crossmint on a deployed network.
+**AI-generated proof of concept.** Review the contract and integration code carefully. Local tests pass, but this sample has not been independently audited or tested end to end through Crossmint. Validate on staging/testnet before using real funds.
 
-The payout implementation is Stellar-specific. It includes a Soroban contract to deploy once per network and a Python function that generates calls to it. No contract has been deployed as part of preparing this repository.
+## How it works
 
-## Multiple recovery methods
+1. Deploy the Soroban helper once on the wallet's network.
+2. Persist a payout job, its payment list and a unique idempotency key on the server.
+3. Call `create_batch_transaction` to generate one `pay` transaction through Crossmint.
+4. Have the wallet's registered signer approve the returned transaction through the application's signing flow.
+5. Verify the final transaction status and recipient balances before marking the job complete.
 
-Use our [recovery POC](https://github.com/Crossmint/crossmint-stellar-wallets-demo/pull/5) as the implementation reference. Its [server functions](https://github.com/Crossmint/crossmint-stellar-wallets-demo/blob/main/lib/crossmint-server.ts) and [approval hook](https://github.com/Crossmint/crossmint-stellar-wallets-demo/blob/main/hooks/use-signers.ts) show the server-request/client-approval split.
+The Python function only generates the transaction. Signing, job persistence and reconciliation belong to the integrating application. The implementation targets Stellar; the batching concept is similar to [Safe MultiSend](https://github.com/safe-fndn/safe-smart-account/blob/main/contracts/libraries/MultiSend.sol) on EVM.
 
-Use `config.recoveryMethods` at wallet creation and `approver` to choose which recovery method authorizes a signer change. Transaction requests use `signer` to select the approving signer. The POC contains the complete flow.
+## Prerequisites
 
-## Operational signer permissions
+- Python 3.10 or later, Rust 1.91 or later, the `wasm32v1-none` target and the [Stellar CLI](https://developers.stellar.org/docs/build/smart-contracts/getting-started/setup).
+- A Crossmint staging server API key with `wallets:transactions.create` permission.
+- A deployed Crossmint Stellar smart wallet with a registered, unrestricted external signer. Possessing a private key alone does not register that signer on the wallet.
+- A funded testnet deployment identity, a trusted token contract and funded source wallet. Recipients must satisfy that token's authorization requirements.
 
-Include these fields in the `POST /wallets/{walletLocator}/signers` body alongside `signer` and `approver`:
+## Set up and test
+
+Clone the repository, then run the following from `samples/atomic-payouts`:
+
+```sh
+cd samples/atomic-payouts
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install requests
+python -m unittest discover -p 'test_*.py' -v
+cargo test --locked
+cargo fmt --check
+stellar contract build
+```
+
+Keep `Cargo.lock`. See the [sample guide](samples/atomic-payouts/README.md#test-and-build) for dependency constraints and what the tests establish.
+
+## Deploy the helper
+
+Use a funded testnet identity configured in the Stellar CLI:
+
+```sh
+stellar contract deploy \
+  --wasm target/wasm32v1-none/release/atomic_payouts.wasm \
+  --source-account YOUR_TESTNET_DEPLOYER \
+  --network testnet \
+  --alias atomic_payouts
+```
+
+Save the returned contract ID as `BATCH_PAYMENTS_CONTRACT_ID`. The helper, source wallet and token must use the same network. Preparing this repository did not deploy a contract.
+
+## Generate a batch on the server
+
+Load these values from server configuration or the persisted payout job:
+
+| Value | Meaning |
+|---|---|
+| `CROSSMINT_API_URL` | `https://staging.crossmint.com/api/2025-06-09` for staging |
+| `CROSSMINT_API_KEY` | Staging server key; keep it out of client code and Git |
+| `SOURCE_WALLET_ADDRESS` | Deployed Crossmint Stellar wallet |
+| `REGISTERED_SIGNER_PUBLIC_KEY` | External signer's public key registered on that wallet |
+| `BATCH_PAYMENTS_CONTRACT_ID` | ID returned by deployment |
+| `TOKEN_CONTRACT_ID` | Trusted token contract selected from server configuration |
+| `BATCH_IDEMPOTENCY_KEY` | Unique key persisted for this logical payout job |
+| `PAYMENTS_FILE` | Path to a JSON array of payments, as shown below |
+
+Create the payments file using real testnet recipients and integer base-unit amounts represented as strings:
 
 ```json
-{
-  "scopes": [{
-    "type": "transfer",
-    "tokenLocator": "stellar:usdc",
-    "spendingLimit": { "amount": "100", "interval": 86400 },
-    "recipients": ["<ALLOWED_RECIPIENT_ADDRESS>"]
-  }],
-  "expiresAt": "2026-12-31T23:59:59Z"
-}
+[
+  { "to": "<RECIPIENT_A>", "amount": "10000000" },
+  { "to": "<RECIPIENT_B>", "amount": "25000000" }
+]
 ```
 
-This grants 100 USDC per 86,400-second interval to that recipient. `expiresAt` applies to the signer. Operational signers cannot administer other signers. Approve the returned registration transaction through the application's signing flow.
+From the same sample directory, generate the transaction:
 
-The reset is interval-based, not a midnight reset. Omitting `interval` makes the cap non-resetting. Omitting recipients permits any recipient; omitting scopes removes the spending restrictions. To replace an existing signer's permissions, remove and re-register it with the new scope rather than assuming this POST patches existing scopes.
+```python
+import json
+import os
+from pathlib import Path
 
-[Permissions guide](https://docs.crossmint.com/wallets/guides/signers/scopes)
+from create_transaction import create_batch_transaction
 
-## WhatsApp OTP
-
-Use this configuration when selecting the installed phone recovery signer for the transaction your backend prepared:
-
-```ts
-await wallet.useSigner({
-  type: "phone",
-  phone: userPhone,
-  channel: "whatsapp",
-});
+transaction = create_batch_transaction(
+    api_url=os.environ["CROSSMINT_API_URL"],
+    api_key=os.environ["CROSSMINT_API_KEY"],
+    idempotency_key=os.environ["BATCH_IDEMPOTENCY_KEY"],
+    wallet_address=os.environ["SOURCE_WALLET_ADDRESS"],
+    signer_locator=f"external-wallet:{os.environ['REGISTERED_SIGNER_PUBLIC_KEY']}",
+    batch_contract_id=os.environ["BATCH_PAYMENTS_CONTRACT_ID"],
+    token_contract_id=os.environ["TOKEN_CONTRACT_ID"],
+    payments=json.loads(Path(os.environ["PAYMENTS_FILE"]).read_text()),
+)
+print(json.dumps(transaction, indent=2))
 ```
 
-Then run the approval/OTP flow. Reapply `channel` when selecting the signer after loading the wallet. This client setting keeps the same phone identity. Verified against the published wallets SDK 1.17.0; use a compatible client package exposing this option.
+Persist the returned transaction ID and pending approvals with the job. After a timeout, retry with the **same key and unchanged payload**. Use a new key only for a genuinely new payout job, even if its payments happen to match. Do not rotate the key to work around an uncertain response.
 
-## Server-side batch transaction generation
+## Approve and verify
 
-The token transfer endpoint generates one transaction per recipient. It does not accept an atomic list of recipients. Multiple calls, including parallel calls, remain separate transactions.
+Use the selected signer's approval flow for the returned transaction. Inspect the complete authorization tree, including the helper, token, recipients, amounts and nested calls. Once approved, Crossmint handles execution. Reconcile the final status and recipient balances; an `awaiting-approval` response is not a completed payout.
 
-For a single atomic payout, deploy the included [typed batch contract](samples/atomic-payouts/src/lib.rs). The server then generates one `contract-call` transaction to `pay`, using the registered external signer locator. The standalone [Python generation function](samples/atomic-payouts/create_transaction.py) accepts the API URL, server key and payment details as arguments and can be adapted to any backend.
+For staging validation, run a successful batch and a batch whose later transfer fails. Confirm all expected credits in the successful case and no partial credits in the failed case. Local host tests cover rollback, but the deployed Crossmint flow still needs this validation.
 
-The deployed contract executes every token transfer within one invocation. A failed transfer reverts the entire group. This is conceptually similar to an EVM batching contract such as [Safe MultiSend](https://github.com/safe-fndn/safe-smart-account/blob/main/contracts/libraries/MultiSend.sol); the implementation here uses Soroban's contract and authorization model.
+## Constraints and references
 
-[Contract setup and server request](samples/atomic-payouts/README.md)
-
-The example assumes a deployed Crossmint Stellar smart wallet, one source, one token and a registered unrestricted external signer. It is a custom-contract integration, not a built-in batch-transfer endpoint. The contract must exist on the same network before Crossmint can inspect its ABI and simulate the transaction. The API returns a transaction awaiting the selected signer's approval.
-
-## Repository layout
-
-- `samples/atomic-payouts/README.md`: build, deployment and transaction-generation instructions
-- `samples/atomic-payouts/create_transaction.py`: Python server request
-- `samples/atomic-payouts/src/`: Soroban contract and four execution/authorization tests
-- `samples/atomic-payouts/Cargo.toml` and `Cargo.lock`: reproducible Rust dependencies
+- One source wallet and one token per invocation. The sample caps a batch at 32 payments; simulation and network limits may require fewer.
+- Transfer-only signer scopes do not authorize the custom `pay` call. This sample assumes an unrestricted signer.
+- The helper accepts a token address. Select it from a trusted per-network configuration or allowlist, not unvalidated client input. An approved malicious token can request unintended nested calls. See the [authorization boundary](samples/atomic-payouts/README.md#contract-and-authorization).
+- Atomic execution does not prevent duplicate payouts submitted as separate transactions; the persisted idempotency key addresses creation retries.
+- [Detailed contract and server guide](samples/atomic-payouts/README.md), [contract](samples/atomic-payouts/src/lib.rs), [Rust tests](samples/atomic-payouts/src/test.rs), [Python tests](samples/atomic-payouts/test_create_transaction.py).
+- [Recovery, operational permissions and WhatsApp reference](docs/wallet-signers.md).
+- AI contributors: read [AGENTS.md](AGENTS.md) before changing the examples.

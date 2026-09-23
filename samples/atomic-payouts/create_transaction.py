@@ -11,17 +11,23 @@ def create_batch_transaction(
     *,
     api_url: str,
     api_key: str,
+    idempotency_key: str,
     wallet_address: str,
     signer_locator: str,
     batch_contract_id: str,
     token_contract_id: str,
     payments: list[dict[str, str]],
 ) -> dict[str, object]:
+    """Reuse the persisted key and unchanged payload when retrying a batch."""
+    if not idempotency_key.strip():
+        raise ValueError("idempotency_key must be a non-empty persisted batch key")
+
     response = requests.post(
         f"{api_url.rstrip('/')}/wallets/{wallet_address}/transactions",
         headers={
             "X-API-KEY": api_key,
             "Content-Type": "application/json",
+            "x-idempotency-key": idempotency_key,
         },
         json={
             "params": {
