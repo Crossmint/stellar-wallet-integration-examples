@@ -1,14 +1,16 @@
 # Atomic Stellar payouts
 
+**AI-generated proof of concept.** Review the contract and server code carefully. Local tests passed, but this sample has not been independently audited or validated end to end through Crossmint. Complete staging/testnet validation before using real funds.
+
 Deploy this helper once, then have your server generate a `pay` transaction through Crossmint's Stellar contract-call API. It transfers a single token directly from one source wallet to every recipient. If any transfer fails, the whole batch reverts. The helper never takes custody of the funds.
 
-This is a customer-deployed contract sample. It is not a built-in Crossmint batch endpoint. The 32-payment guard belongs to this sample; simulation and network resource limits can require smaller batches.
+This is an application-deployed Soroban contract sample, reusable across customers and server frameworks. The atomic execution is conceptually similar to an EVM batch contract such as [Safe MultiSend](https://github.com/safe-fndn/safe-smart-account/blob/main/contracts/libraries/MultiSend.sol), but this code targets Stellar only. It is not a built-in Crossmint batch endpoint. The 32-payment guard belongs to this sample; simulation and network resource limits can require smaller batches.
 
 ## Contract and authorization
 
 The contract in [src/lib.rs](src/lib.rs) takes a token contract address, source wallet address and a typed list of `{ to, amount }` payments. Amounts are positive integer base units.
 
-`from.require_auth()` creates one root authorization for `pay`. Both nested token transfers use that same source. The source wallet signs the entire invocation tree, including the token, recipients and amounts. Recipient signatures are not needed.
+`from.require_auth()` creates one root authorization for `pay`. Every nested token transfer uses that same source. The source wallet authorizes the entire invocation tree, including the token, recipients and amounts. Recipient signatures are not needed.
 
 Use a recovery signer or an unrestricted operational signer. Transfer-only permissions do not authorize this custom `pay` contract call. The sample does not handle multiple source wallets or threshold signing.
 
@@ -55,14 +57,18 @@ Save the returned `C...` contract ID as `BATCH_PAYMENTS_CONTRACT_ID`. The flags 
 
 ## Generate the transaction on your server
 
-This uses the Python `requests` pattern from [USDM1's server](https://github.com/Crossmint/usdm1-wallets-expo-demo/blob/main/server/crossmint_client.py). Copy [create_transaction.py](create_transaction.py) beside `crossmint_client.py` so it uses your existing API URL and server key. Keep the API URL and credentials on the same network as the deployed contract.
+Install `requests` in the backend's Python environment with `python -m pip install requests`, then import [create_transaction.py](create_transaction.py). The function takes explicit configuration arguments and has no app-specific imports. Set `CROSSMINT_API_URL` to `https://staging.crossmint.com/api/2025-06-09` for staging and load `CROSSMINT_API_KEY` from server-side environment configuration. Use the environment and credentials corresponding to the deployed contract's network.
 
 Assumption: the source is an ordinary deployed Crossmint Stellar smart wallet, and the external signer is already registered on it without transfer-only scopes. Owning a private key alone does not register it as a wallet signer. This sample does not assume a special treasury-wallet API configuration.
 
 ```python
+import os
+
 from create_transaction import create_batch_transaction
 
 transaction = create_batch_transaction(
+    api_url=os.environ["CROSSMINT_API_URL"],
+    api_key=os.environ["CROSSMINT_API_KEY"],
     wallet_address=SOURCE_WALLET_ADDRESS,
     signer_locator=f"external-wallet:{REGISTERED_SIGNER_PUBLIC_KEY}",
     batch_contract_id=BATCH_PAYMENTS_CONTRACT_ID,

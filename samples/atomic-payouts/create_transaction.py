@@ -1,4 +1,4 @@
-"""Copy into the USDM1 demo's server directory beside crossmint_client.py.
+"""Generate one Stellar batch-payout transaction using the Crossmint REST API.
 
 Generates a transaction only. The caller handles the returned approvals.
 The batch contract must already be deployed on the wallet's network.
@@ -6,10 +6,11 @@ The batch contract must already be deployed on the wallet's network.
 
 import requests
 
-from crossmint_client import CROSSMINT_API_KEY, CROSSMINT_API_URL
-
 
 def create_batch_transaction(
+    *,
+    api_url: str,
+    api_key: str,
     wallet_address: str,
     signer_locator: str,
     batch_contract_id: str,
@@ -17,9 +18,9 @@ def create_batch_transaction(
     payments: list[dict[str, str]],
 ) -> dict[str, object]:
     response = requests.post(
-        f"{CROSSMINT_API_URL}/wallets/{wallet_address}/transactions",
+        f"{api_url.rstrip('/')}/wallets/{wallet_address}/transactions",
         headers={
-            "X-API-KEY": CROSSMINT_API_KEY,
+            "X-API-KEY": api_key,
             "Content-Type": "application/json",
         },
         json={
